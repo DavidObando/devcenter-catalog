@@ -1,11 +1,18 @@
 [CmdletBinding()]
 param(
-    [Parameter()]
+    [Parameter(Mandatory=$true)]
     [string] $Package,
 
     [Parameter()]
-    [string] $AdditionalOptions
+    [string] $Version,
+ 
+    [Parameter()]
+    [string] $IgnoreChecksums
 )
+
+if (-not $Package) {
+    throw "Package parameter is mandatory. Please provide a value for the Package parameter."
+}
 
 ###################################################################################################
 #
@@ -16,7 +23,7 @@ param(
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Expected path of the choco.exe file.
-$choco = "$Env:ProgramData/chocolatey/choco.exe"
+$Choco = "$Env:ProgramData/chocolatey/choco.exe"
 
 ###################################################################################################
 #
@@ -33,9 +40,15 @@ function Ensure-Chocolatey
     if (-not (Test-Path "$ChocoExePath"))
     {
         Set-ExecutionPolicy Bypass -Scope Process -Force
-        $installScript = (New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1')
-        $expression = "$installScript | powershell.exe -NoProfile -ExecutionPolicy Bypass -Command -"
-        Execute -Expression $expression
+        $installScriptPath = [System.IO.Path]::GetTempFileName() + ".ps1"
+        Invoke-WebRequest -Uri 'https://chocolatey.org/install.ps1' -OutFile $installScriptPath
+
+        try {
+            Execute -File $installScriptPath
+        } finally {
+            Remove-Item $installScriptPath
+        }
+        
         if ($LastExitCode -eq 3010)
         {
             Write-Host 'The recent changes indicate a reboot is necessary. Please reboot at your earliest convenience.'
@@ -49,27 +62,38 @@ function Install-Package
     param(
         [string] $ChocoExePath,
         [string] $Package,
-        [string] $AdditionalOptions,
-        [StringSplitOptions] $SplitOptions = [StringSplitOptions]::RemoveEmptyEntries
+        [string] $Version,
+        [string] $IgnoreChecksums
     )
 
-    # Split package and version 
-    if ($Package.Contains('@')) {
-        $pkgName, $pkgVersion = $Package.Split('@')
-        $expression = "$ChocoExePath install -y -f --acceptlicense --no-progress --stoponfirstfailure $AdditionalOptions $pkgName --version $pkgVersion"
-        } else {
-        $pkgName = $Package
-        $expression = "$ChocoExePath install -y -f --acceptlicense --no-progress --stoponfirstfailure $AdditionalOptions $pkgName"
+    $expression = "$ChocoExePath install $Package"
+    
+    if ($Version){
+        $expression = "$expression --version $Version"
     }
 
-    Execute -Expression $expression
+    $expression = "$expression -y -f --acceptlicense --no-progress --stoponfirstfailure"
+    
+    if ($IgnoreChecksums -eq "true") {
+        $expression = "$expression --ignorechecksums"
+    }
+
+    $expression = "$expression `nexit `$LASTEXITCODE"
+
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    $packageScriptPath = [System.IO.Path]::GetTempFileName() + ".ps1"
+    Set-Content -Value $expression -Path $packageScriptPath
+    Write-Host "File path $packageScriptPath"
+
+    Execute -File $packageScriptPath
+    Remove-Item $packageScriptPath
 }
 
 function Execute
 {
     [CmdletBinding()]
     param(
-        $Expression
+        $File
     )
 
     # Note we're calling powershell.exe directly, instead
@@ -77,15 +101,18 @@ function Execute
     # https://learn.microsoft.com/en-us/powershell/scripting/learn/deep-dives/avoid-using-invoke-expression?view=powershell-7.3
     # Note that this will run powershell.exe
     # even if the system has pwsh.exe.
-    $process = Start-Process powershell.exe -ArgumentList "-Command $Expression" -NoNewWindow -PassThru -Wait
-    $expError = $process.ExitCode.Exception
+    powershell.exe -File $File
+
+    # capture the exit code from the process
+    $processExitCode = $LASTEXITCODE
+
     # This check allows us to capture cases where the command we execute exits with an error code.
     # In that case, we do want to throw an exception with whatever is in stderr. Normally, when
     # Invoke-Expression throws, the error will come the normal way (i.e. $Error) and pass via the
     # catch below.
-    if ($process.ExitCode -or $expError)
+    if ($processExitCode -or $expError)
     {
-        if ($process.ExitCode -eq 3010)
+        if ($processExitCode -eq 3010)
         {
             # Expected condition. The recent changes indicate a reboot is necessary. Please reboot at your earliest convenience.
         }
@@ -95,11 +122,11 @@ function Execute
         }
         else
         {
-            throw "Installation failed ($LastExitCode). Please see the Chocolatey logs in %ALLUSERSPROFILE%\chocolatey\logs folder for details."
+            throw "Installation failed with exit code: $processExitCode. Please see the Chocolatey logs in %ALLUSERSPROFILE%\chocolatey\logs folder for details."
+            break
         }
     }
 }
-
 
 ###################################################################################################
 #
@@ -107,9 +134,9 @@ function Execute
 #
 
 Write-Host 'Ensuring latest Chocolatey version is installed.'
-Ensure-Chocolatey -ChocoExePath "$choco"
+Ensure-Chocolatey -ChocoExePath "$Choco"
 
 Write-Host "Preparing to install Chocolatey package: $Package."
-Install-Package -ChocoExePath "$choco" -Package $Package -AdditionalOptions $AdditionalOptions
+Install-Package -ChocoExePath "$Choco" -Package $Package -Version $Version -IgnoreChecksums $IgnoreChecksums
 
 Write-Host "`nThe artifact was applied successfully.`n"
