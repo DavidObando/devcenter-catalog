@@ -89,17 +89,20 @@ if (!(Get-Command git -ErrorAction SilentlyContinue)) {
     # if winget is available, use it to install git
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         winget install --id Git.Git -e --source winget
+        Write-Host "'winget install --id Git.Git -e --source winget' exited with code: $($LASTEXITCODE)"
     }
     # if choco is available, use it to install git
     elseif (Get-Command choco -ErrorAction SilentlyContinue) {
         choco install git -y
+        Write-Host "'choco install git -y' exited with code: $($LASTEXITCODE)"
     }
     else {
         # if neither winget nor choco are available, install winget and use that to install git
         InstallPS7
         InstallWinGet
         $installed_winget = $true
-        Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine="pwsh.exe -MTA -Command `"Install-WinGetPackage -Id Git.Git`""}
+        pwsh.exe -MTA -Command "Install-WinGetPackage -Id Git.Git"
+        Write-Host "'Install-WinGetPackage -Id Git.Git' exited with code: $($LASTEXITCODE)"
     }
 }
 
@@ -107,22 +110,35 @@ if (!(Test-Path -PathType Leaf "$($CustomizationScriptsDir)\$($LockFile)")) {
     SetupScheduledTasks
 }
 
+# Write intent to output stream
+AppendToUserScript "Write-Host 'Cloning repository: $($RepositoryUrl) to directory: $($Directory)'"
+if ($Branch) {
+    AppendToUserScript "Write-Host 'Using branch: $($Branch)'"
+}
 
-AppendToUserScript "pushd C:\"
+# Capture output streams
+AppendToUserScript "&{"
+
+# Work from C:\
+AppendToUserScript "  pushd C:\"
 if ($installed_winget)
 {
-    AppendToUserScript "Repair-WinGetPackageManager -Latest"
+    AppendToUserScript "  Repair-WinGetPackageManager -Latest"
 }
 
 # make directory if it doesn't exist
-AppendToUserScript "if (!(Test-Path -PathType Container '$($Directory)')) {"
-AppendToUserScript "    New-Item -Path '$($Directory)' -ItemType Directory"
-AppendToUserScript "}"
+AppendToUserScript "  if (!(Test-Path -PathType Container '$($Directory)')) {"
+AppendToUserScript "      New-Item -Path '$($Directory)' -ItemType Directory"
+AppendToUserScript "  }"
 
-AppendToUserScript "pushd $($Directory)"
-AppendToUserScript "git clone $($RepositoryUrl)"
+# Work from specified directory, clone the repo and change branch if needed
+AppendToUserScript "  pushd $($Directory)"
+AppendToUserScript "  git clone $($RepositoryUrl)"
 if ($Branch) {
-    AppendToUserScript "git checkout $($Branch)"
+    AppendToUserScript "  git checkout $($Branch)"
 }
-AppendToUserScript "popd"
-AppendToUserScript "popd"
+AppendToUserScript "  popd"
+AppendToUserScript "  popd"
+
+# Send output streams to log file
+AppendToUserScript "} *>> $env:TEMP\git-cloning.log"
